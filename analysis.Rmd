@@ -2,9 +2,7 @@
 title: "Social Choice Analysis"
 author: "Anthony Santistevan"
 date: "Tuesday, August 19, 2014"
-output:
-  html_notebook: default
-  html_document: default
+output: github_document
 ---
 
 ```{r __init__, echo = FALSE}
