@@ -1,0 +1,517 @@
+---
+title: "Social Choice Analysis"
+author: "Anthony Santistevan"
+date: "Tuesday, August 19, 2014"
+output:
+  html_notebook: default
+  html_document: default
+---
+
+```{r __init__, echo = FALSE}
+
+library(dplyr)
+library(geepack)
+library(ggplot2)
+library(MESS)
+library(reshape2)
+library(scales)
+library(segmented)
+
+set.seed(111)
+
+# Load data
+load('./data/Data.RData')     # raw data: 1 row for every trial in the entire experiment
+load('./data/Data_Agg.RData') # aggregated data: 1 row for every test day in the entire experiment
+
+```
+
+## Determining learning phase
+
+```{r determing learning phase}
+
+set.seed(111)
+mod.segment.init <- glm(cbind(Social, Nonsocial) ~ Day,
+                        family = binomial(link='logit'),
+                        data = Data_Agg)
+
+mod.segment0 <- mod.segment.init
+
+set.seed(111)
+mod.segment1 <- segmented(mod.segment.init,
+                          seg.Z = ~Day,
+                          psi = list(Day=c(7.5)))
+set.seed(111)
+mod.segment2 <- segmented(mod.segment.init,
+                          seg.Z = ~Day,
+                          psi = list(Day=c(7.5,7.5)))
+set.seed(111)
+mod.segment3 <- segmented(mod.segment.init,
+                          seg.Z = ~Day,
+                          psi = list(Day=c(7.5,7.5,7.5)))
+mod.segment <- mod.segment3
+
+# Likelihood-ratio tests to find best-fitting number of knots
+anova(mod.segment0, mod.segment1, mod.segment2, mod.segment3, test="LRT")
+anova(mod.segment0, mod.segment3, test="LRT")
+anova(mod.segment1, mod.segment3, test="LRT")
+anova(mod.segment2, mod.segment3, test="LRT")
+
+sum.segment <- summary(mod.segment)
+
+plot(Data_Agg$Social/(Data_Agg$Trials) ~ Data_Agg$Day, type='n', xlab='Day', ylab='Probability',ylim=c(0,1))
+for(mmu in unique(Data_Agg$MMU)){
+  points(Social/(Trials)~Day, data = Data_Agg[Data_Agg$MMU==mmu,], ylim=c(0,1),
+         pch = 19, type = 'b', col = alpha('grey',0.8), main = paste(mmu), ylab = 'Probability')
+}
+points(unique(fitted(mod.segment)) ~ c(1:15), type='l')
+
+# Hypothesis test for change in slope
+c <- t(c(0,1,1,0,0,0,0,0))
+b.hat <- mod.segment3$coefficients
+t <- (c%*%b.hat)/(c%*%vcov(mod.segment3)%*%t(c))
+```
+## Group-level trends during each learning phase
+
+```{r segmented GEE model}
+
+knots <- c(5.27, 7.6, 9.27)
+Day <- Data_Agg$Day
+
+# Create design matrix
+X.des = cbind(1, Day, sapply(knots, function(k) 
+  ((Day - k > 0) * (Day - k))))
+X.des <- data.frame(X.des)
+X.des$MMU <- Data_Agg$MMU
+names(X.des) <- c("(Intercept)", "Day", "k1", "k2", "k3", "MMU")
+
+Data_Knot <- data.frame(
+  Day <- X.des$Day,
+  k1  <- X.des$k1,
+  k2  <- X.des$k2,
+  k3  <- X.des$k3,
+  MMU <- X.des$MMU,
+  Social <- Data_Agg$Social,
+  Nonsocial <- Data_Agg$Nonsocial
+)
+
+gee.knot.un <- geeglm(cbind(Social, Nonsocial) ~ Day + k1 + k2 + k3,
+                      id = MMU,
+                      corstr='un',
+                      family = 'binomial',
+                      data = Data_Knot)
+
+gee.knot.ex <- geeglm(cbind(Social, Nonsocial) ~ Day + k1 + k2 + k3,
+                      id = MMU,
+                      corstr='ex',
+                      family = 'binomial',
+                      data = Data_Knot)
+
+gee.knot.ind <- geeglm(cbind(Social, Nonsocial) ~ Day + k1 + k2 + k3,
+                       id = MMU,
+                       corstr='ind',
+                       family = 'binomial',
+                       data = Data_Knot)
+
+gee.knot.ar1 <- geeglm(cbind(Social, Nonsocial) ~ Day + k1 + k2 + k3,
+                       id = MMU,
+                       corstr='ar1',
+                       family = 'binomial',
+                       data = Data_Knot)
+
+QIC(gee.knot.un)
+QIC(gee.knot.ex)
+QIC(gee.knot.ind)
+QIC(gee.knot.ar1)
+
+gee.knot <- gee.knot.ar1
+sum.knot <- summary(gee.knot)
+
+## Slope in phase 1
+c <- t(c(0, 1, 0, 0, 0))
+b.hat <- gee.knot$coefficients
+vcov.gee <- gee.knot$geese$vbeta
+k1 <- exp(c %*% b.hat)
+W <- (c %*% b.hat / sqrt(c %*% vcov.gee %*% t(c)))^2
+k1.pval <- 1 - pchisq(W, 1)
+
+## Slope in phase 2
+c <- t(c(0, 1, 1, 0, 0))
+b.hat <- gee.knot$coefficients
+vcov.gee <- gee.knot$geese$vbeta
+k2 <- exp(c%*%b.hat)
+W <- (c %*% b.hat / sqrt(c %*% vcov.gee %*% t(c)))^2
+k2.pval <- 1 - pchisq(W, 1)
+
+## Slope in phase 3
+c <- t(c(0, 1, 1, 1, 0))
+b.hat <- gee.knot$coefficients
+vcov.gee <- gee.knot$geese$vbeta
+k3 <- exp(c%*%b.hat)
+W <- (c %*% b.hat / sqrt(c %*% vcov.gee %*% t(c)))^2
+k3.pval <- 1 - pchisq(W, 1)
+
+## Slope in phase 4
+c <- t(c(0, 1, 1, 1, 1))
+b.hat <- gee.knot$coefficients
+vcov.gee <- gee.knot$geese$vbeta
+k4 <- exp(c%*%b.hat)
+W <- (c %*% b.hat / sqrt(c %*% vcov.gee %*% t(c)))^2
+k4.pval <- 1 - pchisq(W, 1)
+
+data.frame(phase = c(1, 2, 3, 4),
+           slope = c(k1, k2, k3, k4),
+           p.val = format.pval(c(k1.pval, k2.pval, k3.pval, k4.pval)))
+
+```
+
+```{r subject-specific preferences across entire experiment}
+
+mod.glm1 <- glm(cbind(Social, Nonsocial) ~ MMU - 1,
+                family = 'binomial',
+                data = Data_Agg)
+
+sum.glm1 <- summary(mod.glm1)
+
+cbind(plogis(cbind('Estimate' = mod.glm1$coefficients,
+                   confint(mod.glm1))),
+      "p-value" = format.pval(p.adjust(sum.glm1$coefficients[,4])))
+
+```
+## Animal-specific trends across the experiemnt 
+
+```{r subject-specific trends over time}
+
+Data_Agg <- within(Data_Agg, MMU <- relevel(MMU, ref = '32992'))
+glm2.32992 <- glm(cbind(Social, Nonsocial) ~ Day + MMU + Day:MMU,
+                  family = 'binomial',
+                  data = Data_Agg)
+sum.glm2.32992 <- summary(glm2.32992)
+
+Data_Agg <- within(Data_Agg, MMU <- relevel(MMU, ref = '33089'))
+glm2.33089 <- glm(cbind(Social, Nonsocial) ~ Day + MMU + Day:MMU,
+                  family = 'binomial',
+                  data = Data_Agg)
+sum.glm2.33089 <- summary(glm2.33089)
+
+Data_Agg <- within(Data_Agg, MMU <- relevel(MMU, ref = '33825'))
+glm2.33825 <- glm(cbind(Social, Nonsocial) ~ Day + MMU + Day:MMU,
+                  family = 'binomial',
+                  data = Data_Agg)
+sum.glm2.33825 <- summary(glm2.33825)
+
+Data_Agg <- within(Data_Agg, MMU <- relevel(MMU, ref = '34700'))
+glm2.34700 <- glm(cbind(Social, Nonsocial) ~ Day + MMU + Day:MMU,
+                  family = 'binomial',
+                  data = Data_Agg)
+sum.glm2.34700 <- summary(glm2.34700)
+
+Slopes <- data.frame(
+  MMU      = unique(Data_Agg$MMU),
+  Estimate = c(sum.glm2.32992$coefficients[[2]],
+               sum.glm2.33089$coefficients[[2]],
+               sum.glm2.33825$coefficients[[2]],
+               sum.glm2.34700$coefficients[[2]]),
+  p.value  = c(sum.glm2.32992$coefficients[2, 4],
+               sum.glm2.33089$coefficients[2, 4],
+               sum.glm2.33825$coefficients[2, 4],
+               sum.glm2.34700$coefficients[2, 4])
+  )
+
+Slopes$Estimate <- exp(Slopes$Estimate)
+Slopes$p.adj <- p.adjust(Slopes$p.value, n = 4) %>%
+  format.pval()
+
+```
+
+## Animal-specific preference across days 1-5
+
+```{r subject-specific preferences during learning phase}
+
+mod.glm.cut1 <- glm(cbind(Social, Nonsocial) ~ MMU - 1,
+                    family = 'binomial',
+                    data = Data_Agg[Data_Agg$Day <=5,])
+sum.glm1.cut1 <- summary(mod.glm.cut1)
+p.vals <- format.pval(p.adjust(sum.glm1.cut1$coefficients[, 4], method = "bonf"))
+
+cbind(plogis(cbind('Estimate' = mod.glm.cut1$coefficients,confint(mod.glm.cut1))),
+      p.vals) %>%
+  data.frame()
+
+```
+
+## Animal-specific preference across days 6-15
+
+```{r days 6 to 15, echo = FALSE}
+mod.glm.cut2 <- glm(cbind(Social, Nonsocial) ~ MMU - 1,
+                    family = 'binomial',
+                    data = Data_Agg[Data_Agg$Day > 5, ])
+sum.glm1.cut2 <- summary(mod.glm.cut2)
+p.adj <- format.pval(p.adjust(sum.glm1.cut2$coefficients[, 4], "bonf"))
+
+cbind(plogis(cbind('Estimate' = mod.glm.cut2$coefficients,confint(mod.glm.cut2))),
+      p.adj) %>%
+  data.frame()
+```
+```{r group-level social preferences, echo = FALSE}
+
+GEE.ind <- geeglm(cbind(Social, Nonsocial) ~ factor(Day) - 1,
+                  id = MMU,
+                  corstr='ind',
+                  family = 'binomial',
+                  data = Data_Agg)
+
+GEE.un <- geeglm(cbind(Social, Nonsocial) ~ factor(Day) - 1,
+                 id = MMU, corstr='un',
+                 family = 'binomial',
+                 data = Data_Agg)
+
+GEE.ex <- geeglm(cbind(Social, Nonsocial) ~ factor(Day) - 1,
+                 id = MMU,
+                 corstr='ex',
+                 family = 'binomial',
+                 data = Data_Agg)
+
+GEE.ar1 <- geeglm(cbind(Social, Nonsocial) ~ factor(Day) - 1,
+                  id = MMU,
+                  corstr='ar1',
+                  family = 'binomial',
+                  data = Data_Agg)
+
+QIC(GEE.ind)
+QIC(GEE.un)
+QIC(GEE.ex)
+QIC(GEE.ar1)
+
+## Because QIC was lowest for GEE.un, use this model
+GEE.sum <- summary(GEE.un)
+
+z <- qnorm(0.025, lower.tail=FALSE)
+
+beta0 <- GEE.sum$coefficients[,1]
+se.b0 <- GEE.sum$coefficients[,2]
+p     <- GEE.sum$coefficients[,4]
+  
+GEE.lower <- beta0 - z*se.b0
+GEE.upper <- beta0 + z*se.b0
+
+plot(Data_Agg$Social/(Data_Agg$Trials) ~ Data_Agg$Day, ylim=c(0,1), type='n', xlab='Day', ylab='Probability')
+for(mmu in unique(Data_Agg$MMU)){
+  points(Social/(Trials)~Day, data = Data_Agg[Data_Agg$MMU==mmu,],
+         pch = 19, type = 'l', col = alpha('black',.4), main = paste(mmu), ylab = 'Probability')
+}
+
+points(plogis(beta0)~c(1:15), pch=19, ylim=c(0, 1), lwd = 1.5, 
+     ylab='Probability', xlab='Day', type='b', xaxt = 'n')
+axis(side = 1, at = 1:15)
+
+segments(c(1:15), y0 = plogis(GEE.lower), y1 = plogis(GEE.upper))
+text(x = c(1:15), y = c(plogis(GEE.upper) + .01), labels = ifelse(p<0.001,'***',ifelse(p<0.01,'**',ifelse(p<0.05,'*',''))))
+abline(h=0.5, lty=2)
+```
+
+```{r overall group-preference, echo = FALSE}
+mod.gee0  <- geeglm(cbind(Social, Nonsocial) ~ 1,
+                    id = MMU,
+                    corstr='un',
+                    family = 'binomial',
+                    data = Data_Agg)
+sum.gee0 <- summary(mod.gee0)
+
+b0 <- plogis(sum.gee0$coefficients[[1]])
+b0.lower <- plogis(sum.gee0$coefficients[[1]] - 1.96*sum.gee0$coefficients[[2]])
+b0.upper <- plogis(sum.gee0$coefficients[[1]] + 1.96*sum.gee0$coefficients[[2]])
+
+B0 <- cbind( 'Estimate'= b0, '2.5%' = b0.lower, '97.5%' = b0.upper)
+B0
+```
+
+
+## Social preference across test days 1-5
+
+```{r echo = FALSE}
+mod.gee0  <- geeglm(cbind(Social, Nonsocial) ~ 1,
+                    id = MMU, corstr='un',
+                    family = 'binomial',
+                    data = Data_Agg[Data_Agg$Day <= 5,])
+sum.gee0 <- summary(mod.gee0)
+
+b0 <- plogis(sum.gee0$coefficients[[1]])
+b0.lower <- plogis(sum.gee0$coefficients[[1]] - 1.96*sum.gee0$coefficients[[2]])
+b0.upper <- plogis(sum.gee0$coefficients[[1]] + 1.96*sum.gee0$coefficients[[2]])
+
+B0 <- cbind('2.5%' = b0.lower, 'Estimate'= b0, '97.5%' = b0.upper)
+B0
+```
+
+## Social preference across test days 6 - 15
+
+```{r echo = FALSE}
+mod.gee0  <- geeglm(cbind(Social, Nonsocial) ~ 1,
+                    id = MMU,
+                    corstr='un',
+                    family = 'binomial',
+                    data = Data_Agg[Data_Agg$Day >= 6,])
+sum.gee0 <- summary(mod.gee0)
+
+b0 <- plogis(sum.gee0$coefficients[[1]])
+b0.lower <- plogis(sum.gee0$coefficients[[1]] - 1.96*sum.gee0$coefficients[[2]])
+b0.upper <- plogis(sum.gee0$coefficients[[1]] + 1.96*sum.gee0$coefficients[[2]])
+
+B0 <- cbind( 'Estimate'= b0, '2.5%' = b0.lower, '97.5%' = b0.upper)
+B0
+```
+
+## Dwell Count
+
+```{r echo = FALSE}
+MovDwellCount <- dcast(Data, Day + MMU ~ Choice, value.var = 'MovDwellCount', function(x){mean(x, na.rm = T)})
+MovieDwellCount <- melt(MovDwellCount, id.vars = c("Day", "MMU"), variable.name = "Choice")
+MovieDwellCount$phase <- ifelse(MovieDwellCount$Day >= 6, 1, 0)
+MovieDwellCount <- MovieDwellCount[order(MovieDwellCount$MMU),]
+
+mod.gee.un  <- geeglm(value ~ phase, id = factor(MMU), corstr='un', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$Choice == 1 ,])
+mod.gee.ind  <- geeglm(value ~ phase, id = factor(MMU), corstr='ind', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$Choice == 1 ,])
+mod.gee.ar1  <- geeglm(value ~ phase, id = factor(MMU), corstr='ar1', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$Choice == 1 ,])
+mod.gee.ex  <- geeglm(value ~ phase, id = factor(MMU), corstr='ex', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$Choice == 1 ,])
+QIC(mod.gee.un)
+QIC(mod.gee.ind)
+QIC(mod.gee.ar1)
+QIC(mod.gee.ex)
+
+mod.gee1  <- geeglm(value ~ phase, id = factor(MMU), corstr='ex', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$Choice == 1 ,])
+sum.gee1 <- summary(mod.gee1)
+mod.gee2  <- geeglm(value ~ phase, id = factor(MMU), corstr='ex', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$Choice == 0 ,])
+sum.gee2 <- summary(mod.gee2)
+mod.gee3  <- geeglm(value ~ Choice, id = factor(MMU), corstr='ex', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$phase == 0 ,])
+sum.gee3 <- summary(mod.gee3)
+mod.gee4  <- geeglm(value ~ Choice, id = factor(MMU), corstr='ex', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$phase == 1 ,])
+sum.gee4 <- summary(mod.gee4)
+
+mod.gee1  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='ex', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$Choice == 1 ,])
+sum.gee1 <- summary(mod.gee1)
+mod.gee2  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='ex', data = MovieDwellCount[!(is.nan(MovieDwellCount$value)) & MovieDwellCount$Choice == 0 ,])
+sum.gee2 <- summary(mod.gee2)
+
+lower.social <- sum.gee1$coefficients[1] - 1.96*sum.gee1$coefficients[2]
+upper.social <- sum.gee1$coefficients[1] + 1.96*sum.gee1$coefficients[2]
+lower.nonsocial <- sum.gee2$coefficients[1] - 1.96*sum.gee2$coefficients[2]
+upper.nonsocial <- sum.gee2$coefficients[1] + 1.96*sum.gee2$coefficients[2]
+
+par(mfrow = c(1,2))
+plot(unique(predict(mod.gee1)) ~ c(1:2), ylim = 
+       c(min(lower.social, lower.nonsocial),max(upper.social, upper.nonsocial)),
+     xlim = c(.5, 2.5), type='b', pch=1,, axes = F, xlab = "Phase",
+     ylab = "Average Dwell Count", lty=2)
+points(unique(predict(mod.gee2)) ~ c(1:2), type='b', pch=19)
+box()
+axis(1, at=c(1,2), labels = c("Learning", "Post-Learning"))
+axis(2)
+
+X.soc <- c(1,2)
+lower.soc <- lower.social$Estimate
+upper.soc <- upper.social$Estimate
+width=.1
+segments(X.soc,lower.soc,X.soc,upper.soc,lend=1);
+segments(X.soc-width/2,lower.soc,X.soc+width/2,lower.soc, lend=1);
+segments(X.soc-width/2,upper.soc,X.soc+width/2,upper.soc,lend=1);
+
+X.nonsoc <- c(1,2)
+lower.nonsoc <- lower.nonsocial$Estimate
+upper.nonsoc <- upper.nonsocial$Estimate
+segments(X.nonsoc,lower.nonsoc,X.nonsoc,upper.nonsoc,lend=1);
+segments(X.nonsoc-width/2,lower.nonsoc,X.nonsoc+width/2,lower.nonsoc, lend=1);
+segments(X.nonsoc-width/2,upper.nonsoc,X.nonsoc+width/2,upper.nonsoc,lend=1);
+```
+
+## Dwell Duration
+
+```{r echo = FALSE}
+MovDwellDur <- dcast(Data, Day + MMU ~ Choice, value.var = 'MovDwellDur', function(x){mean(x, na.rm = T)})
+MovieDwellDur <- melt(MovDwellDur, id.vars = c("Day", "MMU"), variable.name = "Choice")
+MovieDwellDur$phase <- ifelse(MovieDwellDur$Day >= 6, 1, 0)
+MovieDwellDur <- MovieDwellDur[order(MovieDwellDur$MMU),]
+
+mod.gee1  <- geeglm(value ~ phase, id = factor(MMU), corstr='ex', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 1 ,])
+sum.gee1 <- summary(mod.gee1)
+mod.gee2  <- geeglm(value ~ phase, id = factor(MMU), corstr='ex', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 0 ,])
+sum.gee2 <- summary(mod.gee2)
+mod.gee3  <- geeglm(value ~ Choice, id = factor(MMU), corstr='ex', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$phase == 0 ,])
+sum.gee3 <- summary(mod.gee3)
+mod.gee4  <- geeglm(value ~ Choice, id = factor(MMU), corstr='ex', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$phase == 1 ,])
+sum.gee4 <- summary(mod.gee4)
+
+mod.gee5  <- geeglm(value ~ Choice + phase, id = factor(MMU), corstr='ind', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)),], std.err = 'san.se')
+summary(mod.gee5)
+
+mod.gee1 <- mod.gee.ex  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='ex', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 1 ,])
+sum.gee1 <- summary(mod.gee1)
+mod.gee.un  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='un', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 1 ,])
+mod.gee.ind  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='ind', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 1 ,])
+mod.gee.ar1  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='ar1', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 1 ,])
+QIC(mod.gee.un)
+QIC(mod.gee.ind)
+QIC(mod.gee.ar1)
+QIC(mod.gee.ex)
+
+
+mod.gee2 <- mod.gee.ex <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='ex', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 0 ,])
+mod.gee.un  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='un', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 0 ,])
+mod.gee.ind  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='ind', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 0 ,])
+mod.gee.ar1  <- geeglm(value ~ factor(phase) - 1, id = factor(MMU), corstr='ar1', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 0 ,])
+sum.gee2 <- summary(mod.gee2)
+
+QIC(mod.gee.un)
+QIC(mod.gee.ind)
+QIC(mod.gee.ar1)
+QIC(mod.gee.ex)
+
+lower.social <- sum.gee1$coefficients[1] - 1.96*sum.gee1$coefficients[2]
+upper.social <- sum.gee1$coefficients[1] + 1.96*sum.gee1$coefficients[2]
+lower.nonsocial <- sum.gee2$coefficients[1] - 1.96*sum.gee2$coefficients[2]
+upper.nonsocial <- sum.gee2$coefficients[1] + 1.96*sum.gee2$coefficients[2]
+
+plot(unique(predict(mod.gee1)) ~ c(1:2), ylim = 
+       c(min(lower.social, lower.nonsocial),max(upper.social, upper.nonsocial)),
+     xlim=c(.5,2.5), type='b', pch=1, axes = F, xlab = "Phase",
+     ylab = "Average Dwell Duration (seconds)", lty=2)
+points(unique(predict(mod.gee2)) ~ c(1:2), type='b', pch=19)
+box()
+axis(1, at=c(1,2), labels = c("Learning", "Post-Learning"))
+axis(2, at = seq(13.0,22.0,1.0))
+
+X.soc <- c(1,2)
+lower.soc <- lower.social$Estimate
+upper.soc <- upper.social$Estimate
+width=.1
+segments(X.soc,lower.soc,X.soc,upper.soc,lend=1);
+segments(X.soc-width/2,lower.soc,X.soc+width/2,lower.soc, lend=1);
+segments(X.soc-width/2,upper.soc,X.soc+width/2,upper.soc,lend=1);
+
+X.nonsoc <- c(1,2)
+lower.nonsoc <- lower.nonsocial$Estimate
+upper.nonsoc <- upper.nonsocial$Estimate
+segments(X.nonsoc,lower.nonsoc,X.nonsoc,upper.nonsoc,lend=1);
+segments(X.nonsoc-width/2,lower.nonsoc,X.nonsoc+width/2,lower.nonsoc, lend=1);
+segments(X.nonsoc-width/2,upper.nonsoc,X.nonsoc+width/2,upper.nonsoc,lend=1);
+
+par(mfrow=c(1,1))
+
+MovDwellDur.overall <- dcast(Data, Day ~ Choice, value.var = 'MovDwellDur', function(x){mean(x, na.rm = T)})
+MovieDwellDur.overall <- melt(MovDwellDur.overall, id.vars = c("Day"), variable.name = "Choice")
+plot(MovieDwellDur.overall$value[MovieDwellDur.overall$Choice==0]~c(1:15),ylim=c(12,22),pch=19, ylab = "Average Dwell Duration (seconds)", xlab = "Day", axes=F)
+points(MovieDwellDur.overall$value[MovieDwellDur.overall$Choice==1]~c(1:15),pch=1)
+axis(1, at=c(1:15))
+axis(2)
+box()
+
+mod.gee.fit  <- geeglm(value ~ Day, id = factor(MMU), corstr='ex', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 1 ,])
+
+points(unique(mod.gee.fit$fitted.values)~c(1:15), type='l', ylim=c(12,22))
+
+mod.gee.fit  <- geeglm(value ~ Day, id = factor(MMU), corstr='ex', data = MovieDwellDur[!(is.nan(MovieDwellDur$value)) & MovieDwellDur$Choice == 0,])
+points(unique(mod.gee.fit$fitted.values)~c(1:15), type='l')
+
+
+```
+
+
